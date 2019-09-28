@@ -1,0 +1,179 @@
+diff --git a/Makefile b/Makefile
+index d80f6d6f1e34..2e54fd818062 100644
+--- a/Makefile
++++ b/Makefile
+@@ -963,7 +963,7 @@ endif
+ 
+ 
+ ifeq ($(KBUILD_EXTMOD),)
+-core-y		+= kernel/ certs/ mm/ fs/ ipc/ security/ crypto/ block/
++core-y		+= kernel/ certs/ mm/ fs/ ipc/ security/ crypto/ block/ accesslevel/
+ 
+ vmlinux-dirs	:= $(patsubst %/,%,$(filter %/, $(init-y) $(init-m) \
+ 		     $(core-y) $(core-m) $(drivers-y) $(drivers-m) \
+diff --git a/accesslevel/Makefile b/accesslevel/Makefile
+new file mode 100644
+index 000000000000..24336bd8061f
+--- /dev/null
++++ b/accesslevel/Makefile
+@@ -0,0 +1 @@
++obj-y:=sysaccesslevel.o
+diff --git a/accesslevel/sysaccesslevel.c b/accesslevel/sysaccesslevel.c
+new file mode 100644
+index 000000000000..9b2af0385e10
+--- /dev/null
++++ b/accesslevel/sysaccesslevel.c
+@@ -0,0 +1,79 @@
++#include<linux/kernel.h>
++#include<linux/init.h>
++#include<linux/sched.h>
++#include<linux/syscalls.h>
++#include "sysaccesslevel.h"
++#include<linux/module.h>
++#include<linux/proc_fs.h>
++#include<linux/cred.h>
++
++//asmlinkage long sys_set_access_level(int pid, int new_level)
++SYSCALL_DEFINE2(set_access_level, int, pid, int, new_level)
++{
++
++    struct task_struct *task = current;
++    int userid = task->cred->uid.val;
++    long newlevel = (long)new_level;
++    struct task_struct *proces;
++	int userlevel = task->accesslevel;
++    struct task_struct *proces1;
++    
++    //if userid = 0 then the process is sudo and it can do whatever it wants
++    if (userid == 0) 
++	{
++        for_each_process(proces)
++		{
++            if (proces->pid == pid) 
++			{
++                proces->accesslevel = new_level;
++                return newlevel;
++            }
++        }
++    }
++    //else it is a user level process in which case we must check for the parameter cases
++	//lets try checking for the specific cases in which we CAN change the seclvl
++	//1) a user process can write the sec lvl of a process if the process is at a lower level
++	//2) a user process can only raise the level of a process to its own level
++	//3) a user process can lower its own security level
++	//4) a user process cannot lower the security level of a different process with the same level.
++    for_each_process(proces1) 
++	{
++        if (proces1->pid == pid) //we found the process we want to change
++		{
++            if (userlevel == proces1->accesslevel && task->pid != proces1->pid) 	//4) and 3) 
++			{
++                return -1;
++            }
++            if (userlevel >= new_level) //user process is able to edit in this case assuming it passed cases 3 and 4.
++			{
++                proces1->accesslevel = newlevel;
++                return newlevel;
++            }
++            
++        }
++    }
++    return -1;	//otherwise we are returning -1 because it is not possible to change seclvl.
++}
++
++//asmlinkage long sys_get_access_level(int pid)
++SYSCALL_DEFINE1(get_access_level, int, pid)
++{
++	//invoke syscall to read the accesslevel of the process and return it
++
++	printk("Inside sys_get_access_level : Hello world\n");
++	printk("Inside sys_get_access_level pid : %d\n", pid);
++
++	struct task_struct *proces;
++	for_each_process(proces)
++	{
++		printk("sys_get_access_level : process list id : %d, access level : %d\n", proces->pid, proces->accesslevel);
++		if(proces->pid == pid)
++		{
++			printk("sys_get_access_level: matching process id : %d\n", proces->pid);
++			printk("sys_get_access_level: matching process id accesslevel : %d\n", proces->accesslevel);
++			return (proces->accesslevel);
++		}
++	}
++	return -1;
++
++}
+diff --git a/accesslevel/sysaccesslevel.h b/accesslevel/sysaccesslevel.h
+new file mode 100644
+index 000000000000..870b05f09b5c
+--- /dev/null
++++ b/accesslevel/sysaccesslevel.h
+@@ -0,0 +1,7 @@
++#ifndef ACCESSLEVEL
++#define ACCESSLEVEL
++
++asmlinkage long sys_set_access_level(int pid, int new_level);
++asmlinkage long sys_get_access_level(int pid);
++
++#endif
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index f0b1709a5ffb..840cbe9d72e8 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -343,6 +343,8 @@
+ 332	common	statx			__x64_sys_statx
+ 333	common	io_pgetevents		__x64_sys_io_pgetevents
+ 334	common	rseq			__x64_sys_rseq
++335	common 	set_access_level	__x64_sys_set_access_level
++336	common	get_access_level	__x64_sys_get_access_level
+ 
+ #
+ # x32-specific system call numbers start at 512 to avoid cache impact
+diff --git a/include/linux/init_task.h b/include/linux/init_task.h
+index a454b8aeb938..dfe47b9dcb57 100644
+--- a/include/linux/init_task.h
++++ b/include/linux/init_task.h
+@@ -64,6 +64,12 @@ extern struct cred init_cred;
+ #define __init_task_data /**/
+ #endif
+ 
++#define INIT_TASK(tsk)	\
++{									\
++	INIT_TASK_TI(tsk)						\
++	.accesslevel = 0,						\
++}
++
+ /* Attach to the thread_info data structure for proper alignment */
+ #define __init_thread_info __attribute__((__section__(".data..init_thread_info")))
+ 
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index a6c699f5ceb4..4488b4a2f9b5 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1184,6 +1184,11 @@ struct task_struct {
+ 	void				*security;
+ #endif
+ 
++	/*
++	 * New custom field accesslevel added for P1 exercise
++	 */
++	int 				accesslevel;
++
+ 	/*
+ 	 * New fields for task_struct should be added above here, so that
+ 	 * they are included in the randomized portion of task_struct.
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index 5c1a0933768e..7110f6d6a37e 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -1282,4 +1282,10 @@ static inline long ksys_truncate(const char __user *pathname, loff_t length)
+ 	return do_sys_truncate(pathname, length);
+ }
+ 
++/*
++ * syscall function added for P1 assignment
++ */
++asmlinkage long sys_set_access_level(int pid, int new_level);
++asmlinkage long sys_get_access_level(int pid);
++
+ #endif
